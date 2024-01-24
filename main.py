@@ -6,8 +6,12 @@ from pytube import YouTube
 import ssl
 
 import sqlite3
+import re
 
 from api_token import API_TOKEN
+from path_download import path
+
+pattern = r'(https?://)?(www\.)?(youtube|youtu|youtube-nocookie)\.(com|be)/(watch\?v=|embed/|v/|.+\?v=)?([^&=%\?]{11})'
 
 state_storage = StateMemoryStorage()
 
@@ -27,12 +31,8 @@ class DbConnect:
             url TEXT
             )""")
             db.commit()
-            try:
-                cursor.execute(f"INSERT INTO media (id_tg) VALUES ({self.chat_id})")
-                db.commit()
-            except sqlite3.IntegrityError:
-                cursor.execute(f"UPDATE media SET id_tg = {self.chat_id} WHERE id_tg = {self.chat_id}")
-                db.commit()
+            cursor.execute(f"INSERT OR IGNORE INTO media (id_tg) VALUES ({self.chat_id})")
+            db.commit()
 
     def add_url(self, name_video):
         with sqlite3.connect('YouTube.db') as db:
@@ -56,11 +56,13 @@ def download(url, chat_id):
     ssl._create_default_https_context = ssl._create_unverified_context
 
     yt = YouTube(url)
-    video = yt.streams.first().download('/Users/matveyvarlamov/cours_umschool/umschool/media')
-    name_video = video
-
-    db_add_url = DbConnect(chat_id)
-    db_add_url.add_url(name_video)
+    if (yt.streams.get_highest_resolution().filesize / 1048576) <= 50:
+        video = yt.streams.first().download(path)
+        db_add_url = DbConnect(chat_id)
+        db_add_url.add_url(video)
+    else:
+        db_add_url = DbConnect(chat_id)
+        db_add_url.add_url('None')
 
 
 @bot.message_handler(commands=['start'])
@@ -83,23 +85,33 @@ def callback(call: telebot.types.CallbackQuery):
 
 @bot.message_handler(content_types=['text'], state=States.url)
 def download_url(message: telebot.types.Message):
-    bot.send_message(message.chat.id, 'Сейчас начнется загрузка ⚙️')
-    with bot.retrieve_data(message.from_user.id, message.chat.id) as data:
-        data['url'] = message.text
-        msg = bot.send_message(message.chat.id, '--------------------')
-        download(data['url'], message.chat.id)
-    bot.delete_message(message.chat.id, msg.message_id)
-    bot.send_message(message.chat.id, 'Загрузка завершена 🎉 Отправляю видео 📥')
-    db_get_url = DbConnect(message.chat.id)
-    result = db_get_url.get_url()
-    with open(f'{result}', 'rb') as video:
-        bot.send_video(message.chat.id, video, caption='Держи 🎁')
-    bot.delete_state(message.from_user.id, message.chat.id)
+    if re.findall(pattern, message.text):
+        bot.send_message(message.chat.id, 'Сейчас начнется загрузка ⚙️')
+        with bot.retrieve_data(message.from_user.id, message.chat.id) as data:
+            data['url'] = message.text
+            msg = bot.send_message(message.chat.id, '--------------------')
+            download(data['url'], message.chat.id)
+        bot.delete_message(message.chat.id, msg.message_id)
+        bot.send_message(message.chat.id, 'Загрузка завершена 🎉 Отправляю видео 📥')
+        db_get_url = DbConnect(message.chat.id)
+        result = db_get_url.get_url()
+        if result != 'None':
+            with open(f'{result}', 'rb') as video:
+                bot.send_video(message.chat.id, video, caption='Держи 🎁')
+        else:
+            bot.send_message(message.chat.id, 'К сожалению, видео превышает 50МБ - я не смогу его отправить 😔')
+        bot.delete_state(message.from_user.id, message.chat.id)
+    else:
+        bot.send_message(message.chat.id, 'Неверная ссылка. Проверь на корректность 🔍')
+
+
+@bot.message_handler(content_types=['text'])
+def more_text(message: telebot.types.Message):
+    bot.send_message(message.chat.id, 'Неверная команда ❌\n\nДля загрузки видео нажми кнопку "Начать"')
 
 
 if __name__ == '__main__':
     print('Бот запущен')
     bot.add_custom_filter(custom_filters.StateFilter(bot))
-    bot.add_custom_filter(custom_filters.IsDigitFilter())
     bot.infinity_polling()
     print('Бот остановлен')
